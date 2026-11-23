@@ -1,0 +1,17 @@
+JavrockBanBook/
+├── .github/
+│   └── workflows/
+│       └── build.yml
+├── pom.xml
+└── src/
+    └── main/
+        ├── java/
+        │   └── id/
+        │       └── my/
+        │           └── javrock/
+        │               └── banbook/
+        │                   ├── JavrockBanBook.java
+        │                   └── BookBanListener.java
+        └── resources/
+            ├── plugin.yml
+            └── config.yml
