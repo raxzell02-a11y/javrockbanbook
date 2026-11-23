@@ -1,1 +1,458 @@
+import os
+import zipfile
 
+project_root = "/tmp/JavrockBanBook"
+os.makedirs(os.path.join(project_root, ".github/workflows"), exist_ok=True)
+os.makedirs(os.path.join(project_root, "src/main/java/id/my/javrock/banbook"), exist_ok=True)
+os.makedirs(os.path.join(project_root, "src/main/resources"), exist_ok=True)
+
+pom_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>id.my.javrock</groupId>
+    <artifactId>JavrockBanBook</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>JavrockBanBook</name>
+
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>papermc</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
+            <version>1.21.11-R0.1-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+"""
+
+plugin_yml = """name: JavrockBanBook
+version: '${project.version}'
+main: id.my.javrock.banbook.JavrockBanBook
+api-version: '1.21'
+author: Fras Setiawan
+description: Blokir total WRITABLE_BOOK dan WRITTEN_BOOK di seluruh server.
+permissions:
+  javrockbanbook.bypass:
+    description: Bypass blokir Book and Quill dan Written Book.
+    default: op
+"""
+
+config_yml = """# Pesan blokir saat player mencoba mengakses atau menggunakan item terlarang.
+# Mendukung format warna legacy (&) dan hex (&#RRGGBB).
+blocked-message: "&cItem &fBook and Quill &cdan &fWritten Book &cdilarang keras di server ini!"
+
+# Jika true, player dengan permission 'javrockbanbook.bypass' tidak diblokir saat interaksi/crafting/drop/pickup
+# dan tidak ikut tersapu oleh pembersihan inventory otomatis.
+allow-bypass: true
+
+# Interval sapu bersih inventory/ender chest/open inventory dalam detik (minimal 1)
+purge-interval-seconds: 1
+"""
+
+main_java = """package id.my.javrock.banbook;
+
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Material;
+import org.bukkit.entity.Player;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class JavrockBanBook extends JavaPlugin {
+
+    private static final Pattern HEX_PATTERN = Pattern.compile("&#([A-Fa-f0-9]{6})");
+
+    private String blockedMessage;
+    private boolean allowBypass;
+    private long purgeIntervalSeconds;
+
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        loadPluginConfig();
+
+        getServer().getPluginManager().registerEvents(new BookBanListener(this), this);
+
+        long periodTicks = Math.max(1L, purgeIntervalSeconds) * 20L;
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                if (hasBypass(player)) {
+                    continue;
+                }
+                purgeBannedBooks(player.getInventory());
+                purgeBannedBooks(player.getEnderChest());
+                purgeBannedBooks(player.getOpenInventory().getTopInventory());
+            }
+        }, periodTicks, periodTicks);
+
+        getLogger().info("JavrockBanBook aktif! WRITABLE_BOOK dan WRITTEN_BOOK diblokir total.");
+    }
+
+    public void loadPluginConfig() {
+        String rawMessage = getConfig().getString(
+                "blocked-message",
+                "&cItem &fBook and Quill &cdan &fWritten Book &cdilarang keras di server ini!"
+        );
+        this.blockedMessage = colorize(rawMessage);
+        this.allowBypass = getConfig().getBoolean("allow-bypass", true);
+        this.purgeIntervalSeconds = getConfig().getLong("purge-interval-seconds", 1L);
+    }
+
+    public String getBlockedMessage() {
+        return blockedMessage;
+    }
+
+    public boolean hasBypass(Player player) {
+        return player != null && allowBypass && player.hasPermission("javrockbanbook.bypass");
+    }
+
+    public static String colorize(String text) {
+        if (text == null) {
+            return "";
+        }
+        Matcher matcher = HEX_PATTERN.matcher(text);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String hex = matcher.group(1);
+            StringBuilder replacement = new StringBuilder("§x");
+            for (char c : hex.toCharArray()) {
+                replacement.append('§').append(c);
+            }
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement.toString()));
+        }
+        matcher.appendTail(buffer);
+        return ChatColor.translateAlternateColorCodes('&', buffer.toString());
+    }
+
+    public static boolean isBannedBook(ItemStack item) {
+        if (item == null || item.getType().isAir()) {
+            return false;
+        }
+        Material type = item.getType();
+        return type == Material.WRITABLE_BOOK || type == Material.WRITTEN_BOOK;
+    }
+
+    public static void purgeBannedBooks(Inventory inventory) {
+        if (inventory == null) {
+            return;
+        }
+        for (int i = 0; i < inventory.getSize(); i++) {
+            ItemStack item = inventory.getItem(i);
+            if (isBannedBook(item)) {
+                inventory.setItem(i, null);
+            }
+        }
+    }
+}
+"""
+
+listener_java = """package id.my.javrock.banbook;
+
+import org.bukkit.Material;
+import org.bukkit.entity.Item;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.CrafterCraftEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.entity.ProjectileLaunchEvent;
+import org.bukkit.event.inventory.CraftItemEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryPickupItemEvent;
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
+import org.bukkit.event.player.PlayerEditBookEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.ItemStack;
+
+public class BookBanListener implements Listener {
+
+    private final JavrockBanBook plugin;
+
+    public BookBanListener(JavrockBanBook plugin) {
+        this.plugin = plugin;
+    }
+
+    private void notifyBlocked(Player player) {
+        if (player != null && !plugin.getBlockedMessage().isEmpty()) {
+            player.sendMessage(plugin.getBlockedMessage());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPrepareCraft(PrepareItemCraftEvent event) {
+        if (event.getView().getPlayer() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+        ItemStack result = event.getInventory().getResult();
+        if (JavrockBanBook.isBannedBook(result)) {
+            event.getInventory().setResult(new ItemStack(Material.AIR));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onCraftItem(CraftItemEvent event) {
+        if (event.getWhoClicked() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+        if (JavrockBanBook.isBannedBook(event.getRecipe().getResult()) || JavrockBanBook.isBannedBook(event.getCurrentItem())) {
+            event.setCancelled(true);
+            event.getInventory().setResult(new ItemStack(Material.AIR));
+            if (event.getWhoClicked() instanceof Player player) {
+                notifyBlocked(player);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onCrafterCraft(CrafterCraftEvent event) {
+        if (JavrockBanBook.isBannedBook(event.getResult())) {
+            event.setCancelled(true);
+            event.setResult(new ItemStack(Material.AIR));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerDrop(PlayerDropItemEvent event) {
+        if (plugin.hasBypass(event.getPlayer())) {
+            return;
+        }
+        Item dropEntity = event.getItemDrop();
+        if (JavrockBanBook.isBannedBook(dropEntity.getItemStack())) {
+            dropEntity.remove();
+            notifyBlocked(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEntityPickup(EntityPickupItemEvent event) {
+        if (event.getEntity() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+        if (JavrockBanBook.isBannedBook(event.getItem().getItemStack())) {
+            event.setCancelled(true);
+            event.getItem().remove();
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onHopperPickup(InventoryPickupItemEvent event) {
+        if (JavrockBanBook.isBannedBook(event.getItem().getItemStack())) {
+            event.setCancelled(true);
+            event.getItem().remove();
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryMove(InventoryMoveItemEvent event) {
+        if (JavrockBanBook.isBannedBook(event.getItem())) {
+            event.setCancelled(true);
+            event.setItem(new ItemStack(Material.AIR));
+            JavrockBanBook.purgeBannedBooks(event.getSource());
+            JavrockBanBook.purgeBannedBooks(event.getDestination());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (event.getWhoClicked() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+
+        boolean cursorBanned = JavrockBanBook.isBannedBook(event.getCursor());
+        boolean currentBanned = JavrockBanBook.isBannedBook(event.getCurrentItem());
+        ItemStack hotbarItem = event.getHotbarButton() >= 0
+                ? event.getWhoClicked().getInventory().getItem(event.getHotbarButton())
+                : null;
+        boolean hotbarBanned = JavrockBanBook.isBannedBook(hotbarItem);
+
+        if (cursorBanned || currentBanned || hotbarBanned) {
+            event.setCancelled(true);
+            if (cursorBanned) {
+                event.getWhoClicked().setItemOnCursor(null);
+            }
+            if (currentBanned) {
+                event.setCurrentItem(null);
+            }
+            if (hotbarBanned && event.getHotbarButton() >= 0) {
+                event.getWhoClicked().getInventory().setItem(event.getHotbarButton(), null);
+            }
+            if (event.getWhoClicked() instanceof Player player) {
+                notifyBlocked(player);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (event.getWhoClicked() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+
+        boolean hasBanned = JavrockBanBook.isBannedBook(event.getOldCursor()) || JavrockBanBook.isBannedBook(event.getCursor());
+        if (!hasBanned) {
+            for (ItemStack stack : event.getNewItems().values()) {
+                if (JavrockBanBook.isBannedBook(stack)) {
+                    hasBanned = true;
+                    break;
+                }
+            }
+        }
+        if (hasBanned) {
+            event.setCancelled(true);
+            event.getWhoClicked().setItemOnCursor(null);
+            if (event.getWhoClicked() instanceof Player player) {
+                notifyBlocked(player);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        if (event.getPlayer() instanceof Player player && plugin.hasBypass(player)) {
+            return;
+        }
+        JavrockBanBook.purgeBannedBooks(event.getInventory());
+        JavrockBanBook.purgeBannedBooks(event.getPlayer().getInventory());
+        JavrockBanBook.purgeBannedBooks(event.getPlayer().getEnderChest());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerInteract(PlayerInteractEvent event) {
+        if (plugin.hasBypass(event.getPlayer())) {
+            return;
+        }
+        if (JavrockBanBook.isBannedBook(event.getItem())) {
+            event.setCancelled(true);
+            event.getPlayer().getInventory().remove(event.getItem());
+            notifyBlocked(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEditBook(PlayerEditBookEvent event) {
+        if (plugin.hasBypass(event.getPlayer())) {
+            return;
+        }
+        event.setCancelled(true);
+        notifyBlocked(event.getPlayer());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onProjectileLaunch(ProjectileLaunchEvent event) {
+        if (event.getEntity().getShooter() instanceof Player player) {
+            if (plugin.hasBypass(player)) {
+                return;
+            }
+            ItemStack mainHand = player.getInventory().getItemInMainHand();
+            ItemStack offHand = player.getInventory().getItemInOffHand();
+            if (JavrockBanBook.isBannedBook(mainHand) || JavrockBanBook.isBannedBook(offHand)) {
+                event.setCancelled(true);
+            }
+        }
+    }
+}
+"""
+
+workflow_yml = """name: Build JavrockBanBook
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn -B clean package
+
+      - name: Upload Plugin JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JavrockBanBook-plugin
+          path: target/JavrockBanBook-*.jar
+"""
+
+files = {
+    "pom.xml": pom_xml,
+    ".github/workflows/build.yml": workflow_yml,
+    "src/main/resources/plugin.yml": plugin_yml,
+    "src/main/resources/config.yml": config_yml,
+    "src/main/java/id/my/javrock/banbook/JavrockBanBook.java": main_java,
+    "src/main/java/id/my/javrock/banbook/BookBanListener.java": listener_java,
+}
+
+for rel_path, content in files.items():
+    full_path = os.path.join(project_root, rel_path)
+    with open(full_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+
+zip_output_path = "/tmp/JavrockBanBook-project.zip"
+with zipfile.ZipFile(zip_output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, _, filenames in os.walk(project_root):
+        for fname in sorted(filenames):
+            abs_p = os.path.join(root, fname)
+            arc_p = os.path.relpath(abs_p, "/tmp")
+            zf.write(abs_p, arc_p)
+
+print("Generated zip:", zip_output_path, os.path.getsize(zip_output_path))
